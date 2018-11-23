@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"text/template"
 	"unicode"
 
-	"github.com/alecthomas/template"
 	_ "github.com/lib/pq"
 )
 
@@ -37,13 +37,34 @@ type DBTables map[string][]DBColumn
 type DBColumn struct {
 	ColumnName             string
 	OrdinalPosition        int
-	ColumnDefault          interface{}
+	ColumnDefault          *string
 	IsNullable             bool
-	DataType               interface{}
+	DataType               string
 	UDTName                string
 	CharacterMaximumLength *int
 	CharacterOctetLength   *int
 	NumericPrecision       *int
+}
+
+func (tables *DBTables) AsModels() []Model {
+	models := make([]Model, 0, len(*tables))
+
+	for name, columns := range *tables {
+		modelFields := make([]Field, 0)
+
+		for _, col := range columns {
+			modelFields = append(modelFields, col.AsField())
+		}
+
+		models = append(models, Model{
+			Name:   name,
+			Fields: modelFields,
+		})
+	}
+
+	fmt.Printf("+++ %#v\n\n\n", models[0])
+
+	return models
 }
 
 type Model struct {
@@ -55,6 +76,26 @@ type Field struct {
 	Name string
 	Type string
 	Tag  string
+}
+
+func (col *DBColumn) AsField() Field {
+	var (
+		tag       string
+		fieldType string
+		f         Field
+	)
+	if col.IsNullable {
+		tag = fmt.Sprintf(`sql:"%s"`, col.ColumnName)
+		fieldType = fmt.Sprintf("*%s", col.DataType)
+	} else {
+		tag = fmt.Sprintf(`sql:"%s,notnull"`, col.ColumnName)
+		fieldType = col.DataType
+	}
+	f.Tag = tag
+	f.Type = fieldType
+	f.Name = toCamelCase(col.ColumnName)
+
+	return f
 }
 
 type DB struct {
@@ -71,20 +112,20 @@ func MustNewDB(connStr string) *DB {
 
 func (db *DB) GetAllTables() DBTables {
 	q := `
-	SELECT 
-		c.table_name, c.column_name, c.ordinal_position, c.column_default, bool(c.is_nullable), c.data_type, c.udt_name, 
-		c.character_maximum_length, c.character_octet_length, c.numeric_precision
-	FROM 
-		information_schema.columns AS c 
-	JOIN
-		information_schema.tables as t
-	ON
-		t.table_name = c.table_name
-	WHERE 
-		t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
-	ORDER BY 
-		c.table_name;
-	`
+SELECT 
+	c.table_name, c.column_name, c.ordinal_position, c.column_default, bool(c.is_nullable), c.data_type, c.udt_name, 
+	c.character_maximum_length, c.character_octet_length, c.numeric_precision
+FROM 
+	information_schema.columns AS c 
+JOIN
+	information_schema.tables as t
+ON
+	t.table_name = c.table_name
+WHERE 
+	t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+ORDER BY 
+	c.table_name;
+`
 	tables := make(DBTables)
 	rows, err := db.Query(q)
 	if err != nil {
@@ -98,11 +139,10 @@ func (db *DB) GetAllTables() DBTables {
 			tableName string
 			col       = new(DBColumn)
 		)
-		err := rows.Scan(
+		if err := rows.Scan(
 			&tableName, &col.ColumnName, &col.OrdinalPosition, &col.ColumnDefault, &col.IsNullable, &col.DataType,
 			&col.UDTName, &col.CharacterMaximumLength, &col.CharacterOctetLength, &col.NumericPrecision,
-		)
-		if err != nil {
+		); err != nil {
 			log.Print(err)
 			continue
 		}
@@ -137,7 +177,8 @@ func main() {
 		username, password, database, sslMode,
 	))
 
-	db.GetAllTables()
+	tables := db.GetAllTables()
+	tables.AsModels()
 
 	model := Model{
 		Name: toCamelCase("test_testing_model"),
