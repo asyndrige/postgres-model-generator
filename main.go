@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
+	"go/format"
 	"log"
 	"os"
 	"text/template"
@@ -21,15 +25,11 @@ import (
 )
 
 var (
-	_ = time.Time
+	_ = time.Time{}
 )
 `
 
-	modelTpl = `
-type {{.Name}} struct {
-	{{range .Fields}}{{.Name}} {{.Type}} {{.Tag}} {{end}}
-}
-`
+	modelTpl = "type {{.Name}} struct {\ntableName struct{} `sql:\"{{.TableName}}\"`\n{{range .Fields}}\t{{.Name}} {{.Type}} `{{.Tag}}`\n{{end}} }\n\n"
 )
 
 type DBTables map[string][]DBColumn
@@ -48,28 +48,29 @@ type DBColumn struct {
 
 func (tables *DBTables) AsModels() []Model {
 	models := make([]Model, 0, len(*tables))
+	typer := NewTypesMapping()
 
 	for name, columns := range *tables {
 		modelFields := make([]Field, 0)
 
 		for _, col := range columns {
-			modelFields = append(modelFields, col.AsField())
+			modelFields = append(modelFields, col.AsField(typer))
 		}
 
 		models = append(models, Model{
-			Name:   name,
-			Fields: modelFields,
+			Name:      toCamelCase(name),
+			TableName: name,
+			Fields:    modelFields,
 		})
 	}
-
-	fmt.Printf("+++ %#v\n\n\n", models[0])
 
 	return models
 }
 
 type Model struct {
-	Name   string
-	Fields []Field
+	Name      string
+	TableName string
+	Fields    []Field
 }
 
 type Field struct {
@@ -78,24 +79,67 @@ type Field struct {
 	Tag  string
 }
 
-func (col *DBColumn) AsField() Field {
+func (col *DBColumn) AsField(typer Typer) Field {
 	var (
 		tag       string
 		fieldType string
 		f         Field
 	)
+
 	if col.IsNullable {
 		tag = fmt.Sprintf(`sql:"%s"`, col.ColumnName)
-		fieldType = fmt.Sprintf("*%s", col.DataType)
+		t, err := typer.GetType(col.UDTName)
+		if err != nil {
+			panic(err)
+		}
+		fieldType = fmt.Sprintf("*%s", t)
 	} else {
 		tag = fmt.Sprintf(`sql:"%s,notnull"`, col.ColumnName)
-		fieldType = col.DataType
+		t, err := typer.GetType(col.UDTName)
+		if err != nil {
+			panic(err)
+		}
+		fieldType = t
 	}
 	f.Tag = tag
 	f.Type = fieldType
 	f.Name = toCamelCase(col.ColumnName)
 
 	return f
+}
+
+type TypesMapping struct {
+	SQLTypes map[string][]string
+}
+
+type Typer interface {
+	GetType(string) (string, error)
+}
+
+func NewTypesMapping() *TypesMapping {
+	return &TypesMapping{
+		map[string][]string{
+			"bool":        {"bool"},
+			"string":      {"varchar", "text", "uuid"},
+			"int":         {"int2", "int4", "int8"},
+			"int64":       {"bigint"},
+			"time.Time":   {"timestamp", "date"},
+			"interface{}": {"jsonb", "json"},
+			"[]string":    {"_text", "_varchar", "tsvector"},
+			"[]int":       {"_int2", "_int4", "_int8"},
+		},
+	}
+}
+
+func (tm *TypesMapping) GetType(sqlType string) (string, error) {
+	for goType, sqlTypes := range tm.SQLTypes {
+		for _, t := range sqlTypes {
+			if t == sqlType {
+				return goType, nil
+			}
+		}
+	}
+	return "", errors.New("type not detected")
 }
 
 type DB struct {
@@ -178,26 +222,29 @@ func main() {
 	))
 
 	tables := db.GetAllTables()
-	tables.AsModels()
+	models := tables.AsModels()
+	model := models[0]
 
-	model := Model{
-		Name: toCamelCase("test_testing_model"),
-		Fields: []Field{
-			{
-				Name: toCamelCase("field_id"),
-				Type: "int64",
-				Tag:  `sql:"field_id"`,
-			},
-		},
-	}
 	tmpl, err := template.New("test").Parse(modelTpl)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
-	if err := tmpl.Execute(os.Stdout, model); err != nil {
-		panic(err)
+	var buffer bytes.Buffer
+	buf := bufio.NewWriter(&buffer)
+	buf.WriteString(headerTpl)
+	buf.WriteString("\n")
+	if err := tmpl.Execute(buf, model); err != nil {
+		log.Fatal(err)
 	}
+	buf.Flush()
+
+	content, err := format.Source(buffer.Bytes())
+	modelFile, err := os.Create("models/models.go")
+	if err != nil {
+		log.Fatal(err)
+	}
+	modelFile.Write(content)
 }
 
 // utils
