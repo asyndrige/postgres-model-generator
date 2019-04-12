@@ -10,6 +10,8 @@ import (
 	"go/format"
 	"log"
 	"os"
+	"sort"
+	"strings"
 	"text/template"
 	"unicode"
 
@@ -51,7 +53,11 @@ func (tables *DBTables) AsModels() []Model {
 	typer := NewTypesMapping()
 
 	for name, columns := range *tables {
-		modelFields := make([]Field, 0)
+		modelFields := make([]Field, 0, len(columns))
+
+		sort.Slice(columns, func(i, j int) bool {
+			return columns[i].OrdinalPosition < columns[j].OrdinalPosition
+		})
 
 		for _, col := range columns {
 			modelFields = append(modelFields, col.AsField(typer))
@@ -119,10 +125,10 @@ type Typer interface {
 func NewTypesMapping() *TypesMapping {
 	return &TypesMapping{
 		map[string][]string{
-			"bool":        {"bool"},
-			"string":      {"varchar", "text", "uuid"},
-			"int":         {"int2", "int4", "int8"},
-			"int64":       {"bigint"},
+			"bool":   {"bool"},
+			"string": {"varchar", "text", "uuid"},
+			"int":    {"int2", "int4", "int8"},
+			// "int64":       {"bigint"},
 			"time.Time":   {"timestamp", "date"},
 			"interface{}": {"jsonb", "json"},
 			"[]string":    {"_text", "_varchar", "tsvector"},
@@ -223,24 +229,29 @@ func main() {
 
 	tables := db.GetAllTables()
 	models := tables.AsModels()
-	model := models[0]
-
-	tmpl, err := template.New("test").Parse(modelTpl)
+	// model := models[0]
+	modelFile, err := os.Create("models/models.go")
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	var buffer bytes.Buffer
 	buf := bufio.NewWriter(&buffer)
 	buf.WriteString(headerTpl)
 	buf.WriteString("\n")
-	if err := tmpl.Execute(buf, model); err != nil {
-		log.Fatal(err)
-	}
-	buf.Flush()
 
+	for _, model := range models {
+		tmpl, err := template.New("test").Parse(modelTpl)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if err := tmpl.Execute(buf, model); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	buf.Flush()
 	content, err := format.Source(buffer.Bytes())
-	modelFile, err := os.Create("models/models.go")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -262,5 +273,11 @@ func toCamelCase(in string) (out string) {
 		}
 		out += string(char)
 	}
+	out = strings.NewReplacer(
+		"Id", "ID",
+		"Uuid", "UUID",
+		"Url", "URL",
+		"Html", "HTML",
+	).Replace(out)
 	return
 }
